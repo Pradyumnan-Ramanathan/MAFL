@@ -19,7 +19,7 @@ This project implements **two-level privacy** in **federated learning** using **
 ## 🚀 Getting Started
 
 ```bash
-git clone https://github.com/yourusername/privacy-preserving-fl-ciot.git
+git clone https://github.com/Pradyumnan-Ramanathan/MAFL.git
 cd privacy-preserving-fl-ciot
 pip install -r requirements.txt
 python main.py
