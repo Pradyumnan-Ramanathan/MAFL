@@ -1,0 +1,562 @@
+import numpy as np
+import json
+import hashlib
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, asdict
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import SGDClassifier
+from sklearn.datasets import make_classification
+from sklearn.metrics import accuracy_score
+from phe import paillier
+import spacy
+from collections import defaultdict
+
+# Load spaCy model for NER (install with: python -m spacy download en_core_web_sm)
+# For medical NER, you might want to use scispacy models instead
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    print("Please install spaCy English model: python -m spacy download en_core_web_sm")
+    nlp = None
+
+# ------------------------------
+# Knowledge Capsule Data Structures
+# ------------------------------
+
+@dataclass
+class ClinicalEntity:
+    """Represents a clinical entity extracted from text"""
+    text: str
+    label: str  # DISEASE, DRUG, PROCEDURE, SYMPTOM
+    confidence: float
+    start_pos: int
+    end_pos: int
+
+@dataclass
+class KnowledgeCapsule:
+    """Core knowledge capsule structure"""
+    capsule_id: str
+    timestamp: str
+    source_hash: str  # Hashed identifier for privacy
+    diseases: List[str]
+    medications: List[str]
+    procedures: List[str]
+    symptoms: List[str]
+    metadata: Dict
+    embedding_vector: Optional[List[float]] = None
+    
+    def to_dict(self) -> Dict:
+        return asdict(self)
+    
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), indent=2)
+
+# ------------------------------
+# NER and Information Extraction
+# ------------------------------
+
+class ClinicalNERExtractor:
+    """Extracts clinical entities from medical text"""
+    
+    def __init__(self):
+        self.medical_keywords = {
+            'DISEASE': ['diabetes', 'hypertension', 'covid', 'pneumonia', 'asthma', 
+                       'cancer', 'depression', 'arthritis', 'migraine', 'infection'],
+            'DRUG': ['metformin', 'aspirin', 'ibuprofen', 'prednisone', 'amoxicillin',
+                    'lisinopril', 'atorvastatin', 'omeprazole', 'warfarin', 'insulin'],
+            'PROCEDURE': ['surgery', 'biopsy', 'x-ray', 'mri', 'ct scan', 'blood test',
+                         'endoscopy', 'ultrasound', 'ecg', 'vaccination'],
+            'SYMPTOM': ['fever', 'cough', 'headache', 'nausea', 'fatigue', 'dizziness',
+                       'shortness of breath', 'chest pain', 'abdominal pain', 'rash']
+        }
+    
+    def extract_entities(self, text: str) -> List[ClinicalEntity]:
+        """Extract clinical entities from text using keyword matching and NER"""
+        entities = []
+        text_lower = text.lower()
+        
+        # Simple keyword-based extraction (in real implementation, use proper medical NER)
+        for entity_type, keywords in self.medical_keywords.items():
+            for keyword in keywords:
+                if keyword in text_lower:
+                    start_pos = text_lower.find(keyword)
+                    entities.append(ClinicalEntity(
+                        text=keyword,
+                        label=entity_type,
+                        confidence=0.9,  # Mock confidence
+                        start_pos=start_pos,
+                        end_pos=start_pos + len(keyword)
+                    ))
+        
+        # Use spaCy NER if available for additional entities
+        if nlp:
+            doc = nlp(text)
+            for ent in doc.ents:
+                if ent.label_ in ['PERSON', 'ORG']:  # Filter relevant entities
+                    continue
+                entities.append(ClinicalEntity(
+                    text=ent.text,
+                    label='GENERAL',
+                    confidence=0.8,
+                    start_pos=ent.start_char,
+                    end_pos=ent.end_char
+                ))
+        
+        return entities
+
+# ------------------------------
+# Knowledge Capsule Generator
+# ------------------------------
+
+class KnowledgeCapsuleGenerator:
+    """Generates knowledge capsules from clinical text"""
+    
+    def __init__(self):
+        self.ner_extractor = ClinicalNERExtractor()
+    
+    def generate_capsule(self, clinical_text: str, source_id: str = None) -> KnowledgeCapsule:
+        """Generate a knowledge capsule from clinical text"""
+        
+        # Extract entities
+        entities = self.ner_extractor.extract_entities(clinical_text)
+        
+        # Group entities by type
+        diseases = [e.text for e in entities if e.label == 'DISEASE']
+        medications = [e.text for e in entities if e.label == 'DRUG']
+        procedures = [e.text for e in entities if e.label == 'PROCEDURE']
+        symptoms = [e.text for e in entities if e.label == 'SYMPTOM']
+        
+        # Generate privacy-preserving identifiers
+        capsule_id = self._generate_capsule_id()
+        source_hash = self._hash_source_id(source_id) if source_id else "anonymous"
+        
+        # Create capsule
+        capsule = KnowledgeCapsule(
+            capsule_id=capsule_id,
+            timestamp=datetime.now().isoformat(),
+            source_hash=source_hash,
+            diseases=list(set(diseases)),  # Remove duplicates
+            medications=list(set(medications)),
+            procedures=list(set(procedures)),
+            symptoms=list(set(symptoms)),
+            metadata={
+                'text_length': len(clinical_text),
+                'entity_count': len(entities),
+                'extraction_method': 'keyword_ner'
+            }
+        )
+        
+        return capsule
+    
+    def _generate_capsule_id(self) -> str:
+        """Generate unique capsule ID"""
+        return f"cap_{hashlib.md5(str(datetime.now()).encode()).hexdigest()[:12]}"
+    
+    def _hash_source_id(self, source_id: str) -> str:
+        """Hash source ID for privacy"""
+        return hashlib.sha256(source_id.encode()).hexdigest()[:16]
+
+# ------------------------------
+# Enhanced Client with Knowledge Capsules
+# ------------------------------
+
+class CapsuleClient:
+    """Enhanced client that works with knowledge capsules"""
+    
+    def __init__(self, id, public_key, private_key, clinical_texts: List[str], labels):
+        self.id = id
+        self.public_key = public_key
+        self.private_key = private_key
+        
+        # Generate knowledge capsules from clinical texts
+        self.capsule_generator = KnowledgeCapsuleGenerator()
+        self.knowledge_capsules = []
+        self.capsule_features = []
+        
+        # Process clinical texts into capsules and features
+        self._process_clinical_data(clinical_texts, labels)
+        
+        self.model_weights = None
+    
+    def _process_clinical_data(self, clinical_texts: List[str], labels):
+        """Process clinical texts into knowledge capsules and feature vectors"""
+        
+        for i, text in enumerate(clinical_texts):
+            # Generate knowledge capsule
+            capsule = self.capsule_generator.generate_capsule(text, f"patient_{i}")
+            self.knowledge_capsules.append(capsule)
+            
+            # Convert capsule to feature vector (simple bag-of-words approach)
+            features = self._capsule_to_features(capsule)
+            self.capsule_features.append(features)
+        
+        # Convert to numpy arrays and split
+        self.capsule_features = np.array(self.capsule_features)
+        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
+            self.capsule_features, labels, test_size=0.3, random_state=42
+        )
+    
+    def _capsule_to_features(self, capsule: KnowledgeCapsule) -> np.ndarray:
+        """Convert knowledge capsule to feature vector"""
+        # Simple feature engineering: count of each entity type + some metadata
+        features = [
+            len(capsule.diseases),
+            len(capsule.medications),
+            len(capsule.procedures),
+            len(capsule.symptoms),
+            capsule.metadata.get('entity_count', 0)
+        ]
+        return np.array(features, dtype=float)
+    
+    def train_local_model(self):
+        """Train local model on capsule features"""
+        clf = SGDClassifier(loss='log_loss', max_iter=1000, learning_rate='constant', eta0=0.01)
+        clf.fit(self.X_train, self.y_train)
+        self.model_weights = clf.coef_[0]
+        return self.model_weights
+    
+    def encrypt_weights(self):
+        """Encrypt model weights for secure aggregation"""
+        return [self.public_key.encrypt(float(x)) for x in self.model_weights]
+    
+    def decrypt_weights(self, encrypted_weights):
+        """Decrypt aggregated weights"""
+        return np.array([self.private_key.decrypt(x) for x in encrypted_weights])
+    
+    def get_capsule_summary(self) -> Dict:
+        """Get summary of knowledge capsules for this client"""
+        if not self.knowledge_capsules:
+            return {}
+        
+        summary = {
+            'total_capsules': len(self.knowledge_capsules),
+            'unique_diseases': set(),
+            'unique_medications': set(),
+            'unique_procedures': set(),
+            'unique_symptoms': set()
+        }
+        
+        for capsule in self.knowledge_capsules:
+            summary['unique_diseases'].update(capsule.diseases)
+            summary['unique_medications'].update(capsule.medications)
+            summary['unique_procedures'].update(capsule.procedures)
+            summary['unique_symptoms'].update(capsule.symptoms)
+        
+        # Convert sets to lists for JSON serialization
+        for key in ['unique_diseases', 'unique_medications', 'unique_procedures', 'unique_symptoms']:
+            summary[key] = list(summary[key])
+        
+        return summary
+
+# ------------------------------
+# Enhanced Server with Capsule Analytics
+# ------------------------------
+
+class CapsuleServer:
+    """Enhanced server that aggregates models and provides capsule analytics"""
+    
+    def __init__(self, public_key):
+        self.public_key = public_key
+        self.encrypted_models = []
+        self.client_summaries = []
+    
+    def receive_encrypted_model(self, encrypted_model, client_summary=None):
+        """Receive encrypted model and optional client capsule summary"""
+        self.encrypted_models.append(encrypted_model)
+        if client_summary:
+            self.client_summaries.append(client_summary)
+    
+    def aggregate_encrypted_models(self, num_clients):
+        """Aggregate encrypted models using homomorphic encryption"""
+        if not self.encrypted_models:
+            return []
+        
+        n_weights = len(self.encrypted_models[0])
+        aggregated_model = []
+        
+        for i in range(n_weights):
+            sum_enc = sum(client_weights[i] for client_weights in self.encrypted_models)
+            avg_enc = sum_enc * (1 / num_clients)
+            aggregated_model.append(avg_enc)
+        
+        return aggregated_model
+    
+    def get_federated_insights(self) -> Dict:
+        """Generate federated insights from client summaries without exposing raw data"""
+        if not self.client_summaries:
+            return {}
+        
+        insights = {
+            'total_clients': len(self.client_summaries),
+            'total_capsules': sum(s['total_capsules'] for s in self.client_summaries),
+            'common_diseases': defaultdict(int),
+            'common_medications': defaultdict(int),
+            'common_procedures': defaultdict(int),
+            'common_symptoms': defaultdict(int)
+        }
+        
+        # Aggregate common entities across clients
+        for summary in self.client_summaries:
+            for disease in summary['unique_diseases']:
+                insights['common_diseases'][disease] += 1
+            for medication in summary['unique_medications']:
+                insights['common_medications'][medication] += 1
+            for procedure in summary['unique_procedures']:
+                insights['common_procedures'][procedure] += 1
+            for symptom in summary['unique_symptoms']:
+                insights['common_symptoms'][symptom] += 1
+        
+        # Convert to regular dicts and sort by frequency
+        for key in ['common_diseases', 'common_medications', 'common_procedures', 'common_symptoms']:
+            insights[key] = dict(sorted(insights[key].items(), key=lambda x: x[1], reverse=True))
+        
+        return insights
+
+# ------------------------------
+# Main Federated Training with Knowledge Capsules
+# ------------------------------
+
+def generate_mock_clinical_data(num_samples: int) -> Tuple[List[str], np.ndarray]:
+    """Generate mock clinical text data for demonstration"""
+    
+    clinical_templates = [
+        "Patient diagnosed with diabetes and prescribed metformin. Blood test recommended.",
+        "Hypertension patient experiencing headache and dizziness. Started on lisinopril.",
+        "COVID symptoms include fever and cough. Rest and monitoring advised.",
+        "Asthma patient with shortness of breath. Prescribed inhaler and chest x-ray.",
+        "Depression diagnosis with fatigue symptoms. Started on therapy and medication.",
+        "Arthritis patient with joint pain. Anti-inflammatory drugs prescribed.",
+        "Pneumonia case with fever and chest pain. Antibiotics and rest recommended.",
+        "Migraine patient with severe headache. Pain management protocol initiated.",
+        "Cancer patient undergoing biopsy procedure. Oncology consultation scheduled.",
+        "Heart condition requiring ECG and blood test. Cardiac medication started."
+    ]
+    
+    # Generate random clinical texts and binary labels
+    clinical_texts = []
+    labels = []
+    
+    for i in range(num_samples):
+        text = clinical_templates[i % len(clinical_templates)]
+        # Add some variation
+        if i % 3 == 0:
+            text += " Follow-up appointment scheduled."
+        clinical_texts.append(text)
+        labels.append(i % 2)  # Binary classification
+    
+    return clinical_texts, np.array(labels)
+
+def federated_capsule_training(num_clients=3, num_rounds=3, samples_per_client=30):
+    """Run federated training with knowledge capsules"""
+    
+    print("🏥 Initializing Federated Knowledge Capsule System...")
+    
+    # Generate mock clinical data
+    total_samples = num_clients * samples_per_client
+    clinical_texts, labels = generate_mock_clinical_data(total_samples)
+    
+    # Split data among clients
+    texts_per_client = np.array_split(clinical_texts, num_clients)
+    labels_per_client = np.array_split(labels, num_clients)
+    
+    # Generate cryptographic keys
+    public_key, private_key = paillier.generate_paillier_keypair()
+    
+    # Initialize clients with clinical data
+    clients = []
+    for i in range(num_clients):
+        print(f"📋 Initializing Client {i} with {len(texts_per_client[i])} clinical records...")
+        client = CapsuleClient(i, public_key, private_key, texts_per_client[i], labels_per_client[i])
+        clients.append(client)
+        
+        # Display client's capsule summary
+        summary = client.get_capsule_summary()
+        print(f"   - Generated {summary['total_capsules']} knowledge capsules")
+        print(f"   - Diseases: {len(summary['unique_diseases'])}, Medications: {len(summary['unique_medications'])}")
+    
+    # Initialize server
+    server = CapsuleServer(public_key)
+    
+    # Federated training rounds
+    for round_num in range(num_rounds):
+        print(f"\n🔄 Round {round_num + 1}/{num_rounds}")
+        print("=" * 50)
+        
+        # Clear previous round data
+        server.encrypted_models.clear()
+        server.client_summaries.clear()
+        
+        # Each client trains locally and encrypts weights
+        for client in clients:
+            print(f"🧠 Client {client.id}: Training on knowledge capsule features...")
+            local_weights = client.train_local_model()
+            encrypted_weights = client.encrypt_weights()
+            client_summary = client.get_capsule_summary()
+            
+            server.receive_encrypted_model(encrypted_weights, client_summary)
+            print(f"   ✅ Client {client.id}: Encrypted weights sent to server")
+        
+        # Server aggregates encrypted models
+        print("🔐 Server: Aggregating encrypted models...")
+        encrypted_global_model = server.aggregate_encrypted_models(num_clients)
+        
+        # Server generates federated insights
+        insights = server.get_federated_insights()
+        print(f"📊 Federated Insights:")
+        print(f"   - Total capsules across network: {insights['total_capsules']}")
+        print(f"   - Most common disease: {list(insights['common_diseases'].keys())[0] if insights['common_diseases'] else 'None'}")
+        print(f"   - Most common medication: {list(insights['common_medications'].keys())[0] if insights['common_medications'] else 'None'}")
+        
+        # Clients decrypt global model
+        for client in clients:
+            decrypted_weights = client.decrypt_weights(encrypted_global_model)
+            client.model_weights = decrypted_weights
+            print(f"   ✅ Client {client.id}: Received and decrypted global model")
+    
+    return clients, server
+
+def evaluate_capsule_model(clients):
+    """Evaluate the federated model trained on knowledge capsules"""
+    print("\n📈 Model Evaluation")
+    print("=" * 30)
+    
+    total_accuracy = 0
+    for client in clients:
+        # Create classifier with trained weights
+        clf = SGDClassifier()
+        clf.coef_ = client.model_weights.reshape(1, -1)
+        clf.intercept_ = np.array([0])
+        clf.classes_ = np.array([0, 1])
+        
+        # Evaluate on test set
+        predictions = clf.predict(client.X_test)
+        accuracy = accuracy_score(client.y_test, predictions)
+        total_accuracy += accuracy
+        
+        print(f"Client {client.id} Test Accuracy: {accuracy:.3f}")
+        
+        # Show some capsule examples
+        print(f"   Sample capsules from Client {client.id}:")
+        for i, capsule in enumerate(client.knowledge_capsules[:2]):
+            print(f"     Capsule {i+1}: {len(capsule.diseases)} diseases, {len(capsule.medications)} medications")
+    
+    avg_accuracy = total_accuracy / len(clients)
+    print(f"\n🎯 Average Accuracy Across All Clients: {avg_accuracy:.3f}")
+
+# ------------------------------
+# Demo Execution
+# ------------------------------
+
+if __name__ == "__main__":
+    print("🚀 Starting Federated Knowledge Capsule System Demo")
+    print("=" * 60)
+    
+    # Run federated training with knowledge capsules
+    clients, server = federated_capsule_training(
+        num_clients=3, 
+        num_rounds=3, 
+        samples_per_client=20
+    )
+    
+    # Evaluate the trained models
+    evaluate_capsule_model(clients)
+    
+    print("\n✨ Demo completed successfully!")
+    print("\nKey Features Demonstrated:")
+    print("✓ Clinical text → Knowledge Capsule extraction")
+    print("✓ Privacy-preserving capsule features")
+    print("✓ Homomorphic encryption for secure aggregation")
+    print("✓ Federated insights without data sharing")
+    print("✓ Machine learning on structured medical knowledge")
+
+
+🚀 Starting Federated Knowledge Capsule System Demo
+============================================================
+🏥 Initializing Federated Knowledge Capsule System...
+📋 Initializing Client 0 with 20 clinical records...
+   - Generated 20 knowledge capsules
+   - Diseases: 9, Medications: 2
+📋 Initializing Client 1 with 20 clinical records...
+   - Generated 20 knowledge capsules
+   - Diseases: 9, Medications: 2
+📋 Initializing Client 2 with 20 clinical records...
+   - Generated 20 knowledge capsules
+   - Diseases: 9, Medications: 2
+
+🔄 Round 1/3
+==================================================
+🧠 Client 0: Training on knowledge capsule features...
+   ✅ Client 0: Encrypted weights sent to server
+🧠 Client 1: Training on knowledge capsule features...
+   ✅ Client 1: Encrypted weights sent to server
+🧠 Client 2: Training on knowledge capsule features...
+   ✅ Client 2: Encrypted weights sent to server
+🔐 Server: Aggregating encrypted models...
+📊 Federated Insights:
+   - Total capsules across network: 60
+   - Most common disease: diabetes
+   - Most common medication: metformin
+   ✅ Client 0: Received and decrypted global model
+   ✅ Client 1: Received and decrypted global model
+   ✅ Client 2: Received and decrypted global model
+
+🔄 Round 2/3
+==================================================
+🧠 Client 0: Training on knowledge capsule features...
+   ✅ Client 0: Encrypted weights sent to server
+🧠 Client 1: Training on knowledge capsule features...
+   ✅ Client 1: Encrypted weights sent to server
+🧠 Client 2: Training on knowledge capsule features...
+   ✅ Client 2: Encrypted weights sent to server
+🔐 Server: Aggregating encrypted models...
+📊 Federated Insights:
+   - Total capsules across network: 60
+   - Most common disease: diabetes
+   - Most common medication: metformin
+   ✅ Client 0: Received and decrypted global model
+   ✅ Client 1: Received and decrypted global model
+   ✅ Client 2: Received and decrypted global model
+
+🔄 Round 3/3
+==================================================
+🧠 Client 0: Training on knowledge capsule features...
+   ✅ Client 0: Encrypted weights sent to server
+🧠 Client 1: Training on knowledge capsule features...
+   ✅ Client 1: Encrypted weights sent to server
+🧠 Client 2: Training on knowledge capsule features...
+   ✅ Client 2: Encrypted weights sent to server
+🔐 Server: Aggregating encrypted models...
+📊 Federated Insights:
+   - Total capsules across network: 60
+   - Most common disease: diabetes
+   - Most common medication: metformin
+   ✅ Client 0: Received and decrypted global model
+   ✅ Client 1: Received and decrypted global model
+   ✅ Client 2: Received and decrypted global model
+
+📈 Model Evaluation
+==============================
+Client 0 Test Accuracy: 0.000
+   Sample capsules from Client 0:
+     Capsule 1: 1 diseases, 1 medications
+     Capsule 2: 1 diseases, 1 medications
+Client 1 Test Accuracy: 0.000
+   Sample capsules from Client 1:
+     Capsule 1: 1 diseases, 1 medications
+     Capsule 2: 1 diseases, 1 medications
+Client 2 Test Accuracy: 0.000
+   Sample capsules from Client 2:
+     Capsule 1: 1 diseases, 1 medications
+     Capsule 2: 1 diseases, 1 medications
+
+🎯 Average Accuracy Across All Clients: 0.000
+
+✨ Demo completed successfully!
+
+Key Features Demonstrated:
+✓ Clinical text → Knowledge Capsule extraction
+✓ Privacy-preserving capsule features
+✓ Homomorphic encryption for secure aggregation
+✓ Federated insights without data sharing
+✓ Machine learning on structured medical knowledge
