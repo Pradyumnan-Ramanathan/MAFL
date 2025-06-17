@@ -1,0 +1,3 @@
+### 🛡️ Secure Federated Learning for CIoT Devices
+
+To tackle growing privacy concerns in Consumer IoT (CIoT), this project presents a two-level privacy-preserving framework that combines **Federated Learning** with **Partially Homomorphic Encryption (PHE)**. Unlike fully homomorphic encryption (computationally heavy) or differential privacy (accuracy trade-offs), PHE strikes a balance between efficiency and security. It enables encrypted model aggregation without exposing user data. Experimental results show enhanced protection against inference attacks and improved system reliability.
