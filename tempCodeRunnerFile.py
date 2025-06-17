@@ -1,0 +1,1 @@
+model = MultiHeadHospitalNet().to(device)
